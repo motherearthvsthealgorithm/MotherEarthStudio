@@ -16,7 +16,7 @@ def choose_video():
 
 app = tk.Tk()
 app.title("Mother Earth Studio")
-app.geometry("600x340")
+app.geometry("700x520")
 
 selected_video = tk.StringVar()
 

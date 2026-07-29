@@ -1,8 +1,12 @@
+import os
+import subprocess
 import tkinter as tk
 from tkinter import filedialog
-import subprocess
+
+
 def choose_video():
     filename = filedialog.askopenfilename(
+        initialdir="Assets/Forest",
         title="Choose a forest video",
         filetypes=[
             ("Video files", "*.mp4 *.mov *.m4v"),
@@ -13,9 +17,12 @@ def choose_video():
     if filename:
         selected_video.set(filename)
         status_label.config(text="Video selected.")
+
+
 def choose_voiceover():
     filename = filedialog.askopenfilename(
-        title="Choose a voice-over recording",
+        initialdir="Assets/Narration",
+        title="Choose a narration recording",
         filetypes=[
             ("Audio files", "*.mp3 *.wav *.m4a *.aac"),
             ("All files", "*.*"),
@@ -24,7 +31,9 @@ def choose_voiceover():
 
     if filename:
         selected_voiceover.set(filename)
-        status_label.config(text="Voice-over selected.")
+        status_label.config(text="Narration selected.")
+
+
 def build_episode():
     video = selected_video.get()
     voice = selected_voiceover.get()
@@ -34,27 +43,46 @@ def build_episode():
         return
 
     if not voice:
-        status_label.config(text="Please choose a voice-over.")
+        status_label.config(text="Please choose a narration recording.")
         return
 
-    output = "Output/Episode_001.mp4"
+    os.makedirs("Output", exist_ok=True)
+
+    episode = 1
+    while True:
+        output = f"Output/Episode_{episode:03d}.mp4"
+        if not os.path.exists(output):
+            break
+        episode += 1
 
     status_label.config(text="Building episode...")
+    app.update_idletasks()
 
-    subprocess.run([
-        "ffmpeg",
-        "-y",
-        "-i", video,
-        "-i", voice,
-        "-map", "0:v:0",
-"-map", "1:a:0",
-"-c:v", "copy",
-"-c:a", "aac",
-"-shortest",
-        output
-    ])
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i", video,
+                "-i", voice,
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                output,
+            ],
+            check=True,
+        )
+    except FileNotFoundError:
+        status_label.config(text="FFmpeg was not found.")
+        return
+    except subprocess.CalledProcessError:
+        status_label.config(text="Episode build failed. Check the terminal.")
+        return
 
-    status_label.config(text="✅ Episode created!")            
+    status_label.config(text=f"✅ Created {os.path.basename(output)}")
+
 
 app = tk.Tk()
 app.title("Mother Earth Studio")
@@ -65,7 +93,7 @@ selected_voiceover = tk.StringVar()
 
 title_label = tk.Label(
     app,
-    text="🌎 Mother Earth Studio", 
+    text="🌎 Mother Earth Studio",
     font=("Helvetica Neue", 24),
 )
 title_label.pack(pady=(30, 5))
@@ -88,7 +116,7 @@ choose_button.pack()
 
 voiceover_button = tk.Button(
     app,
-    text="Choose Voice-over",
+    text="Choose Narration",
     command=choose_voiceover,
     width=24,
     height=2,
@@ -101,6 +129,7 @@ voiceover_label = tk.Label(
     wraplength=520,
 )
 voiceover_label.pack(pady=10)
+
 build_button = tk.Button(
     app,
     text="✨ Build Episode",
@@ -108,8 +137,8 @@ build_button = tk.Button(
     width=24,
     height=2,
 )
-
 build_button.pack(pady=(20, 0))
+
 video_label = tk.Label(
     app,
     textvariable=selected_video,

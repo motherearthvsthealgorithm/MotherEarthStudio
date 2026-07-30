@@ -20,7 +20,7 @@ class StudioApp(tk.Tk):
         self.settings = load_settings()
         self.system = check_system()
 
-        self.title("Mother Earth Studio 0.9.4")
+        self.title("Mother Earth Studio 0.9.5")
         self.geometry("980x760")
         self.minsize(860, 680)
 
@@ -31,6 +31,7 @@ class StudioApp(tk.Tk):
         self.episode_title = tk.StringVar()
         self.music_volume = tk.DoubleVar(value=self.settings.music_volume)
         self.burn_captions = tk.BooleanVar(value=self.settings.burn_captions_when_supported)
+        self.story_first = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Choose your story and media, then build a post-ready episode.")
 
         self._build_ui()
@@ -86,11 +87,12 @@ class StudioApp(tk.Tk):
 
         actions = ttk.Frame(media)
         actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        actions.columnconfigure((0, 1, 2), weight=1)
+        actions.columnconfigure((0, 1, 2, 3), weight=1)
         self.caption_button = ttk.Button(actions, text="Generate Captions", command=self.start_caption_generation)
         self.caption_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(actions, text="Clear Music", command=lambda: self._clear("music", self.music, "Music cleared.")).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(actions, text="Clear Captions", command=lambda: self._clear("subtitles", self.subtitles, "Captions cleared.")).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        ttk.Button(actions, text="Review Captions", command=self.review_captions).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(actions, text="Clear Music", command=lambda: self._clear("music", self.music, "Music cleared.")).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(actions, text="Clear Captions", command=lambda: self._clear("subtitles", self.subtitles, "Captions cleared.")).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         options = ttk.LabelFrame(main, text="Build", style="Section.TLabelframe")
         options.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
@@ -103,18 +105,19 @@ class StudioApp(tk.Tk):
         ttk.Scale(vol, from_=0, to=50, variable=self.music_volume, command=self._volume_changed).grid(row=0, column=0, sticky="ew")
         self.volume_label = ttk.Label(vol, text=f"{int(self.music_volume.get())}%", width=5, anchor="e")
         self.volume_label.grid(row=0, column=1, padx=(8, 0))
-        ttk.Checkbutton(options, text="Burn captions into video when supported", variable=self.burn_captions).grid(row=2, column=0, sticky="w")
-        ttk.Separator(options).grid(row=3, column=0, sticky="ew", pady=10)
+        ttk.Checkbutton(options, text="Use story-first highlights", variable=self.story_first).grid(row=2, column=0, sticky="w")
+        ttk.Checkbutton(options, text="Burn captions into video when supported", variable=self.burn_captions).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Separator(options).grid(row=4, column=0, sticky="ew", pady=10)
         self.system_label = ttk.Label(options, justify="left", wraplength=300)
-        self.system_label.grid(row=4, column=0, sticky="w")
-        ttk.Label(options, text="Posting continuity: if subtitle burning is unavailable, Studio still creates a compatible MP4 and keeps the .srt beside it.", wraplength=300, justify="left").grid(row=5, column=0, sticky="w", pady=(10, 10))
+        self.system_label.grid(row=5, column=0, sticky="w")
+        ttk.Label(options, text="Posting continuity: if subtitle burning is unavailable, Studio still creates a compatible MP4 and keeps the .srt beside it.", wraplength=300, justify="left").grid(row=6, column=0, sticky="w", pady=(10, 10))
         self.progress = ttk.Progressbar(options, mode="indeterminate")
-        self.progress.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+        self.progress.grid(row=7, column=0, sticky="ew", pady=(0, 10))
         self.build_button = ttk.Button(options, text="✨ Build Post-Ready Episode", command=self.start_build, style="Build.TButton")
-        self.build_button.grid(row=7, column=0, sticky="ew")
-        ttk.Label(options, textvariable=self.status, anchor="n", justify="left", wraplength=300).grid(row=8, column=0, sticky="nsew", pady=(12, 0))
+        self.build_button.grid(row=8, column=0, sticky="ew")
+        ttk.Label(options, textvariable=self.status, anchor="n", justify="left", wraplength=300).grid(row=9, column=0, sticky="nsew", pady=(12, 0))
 
-        ttk.Label(self, text="Mother Earth Studio 0.9.4 • Caption Compatibility Release").grid(row=2, column=0, pady=(0, 8))
+        ttk.Label(self, text="Mother Earth Studio 0.9.5 • Story-First Foundation").grid(row=2, column=0, pady=(0, 8))
 
     def _media_row(self, parent, row, key, icon, name, variable, initial_dir, filetypes, optional=False):
         ttk.Label(parent, text=f"{icon}  {name}", font=("Helvetica Neue", 11, "bold")).grid(row=row, column=0, sticky="w", pady=8)
@@ -191,11 +194,11 @@ class StudioApp(tk.Tk):
         script = self.script_text.get("1.0", "end").strip()
         self._busy(True)
         self.status.set("Generating captions locally. The approved script controls the wording when provided...")
-        threading.Thread(target=self._caption_worker, args=(narration, destination, script), daemon=True).start()
+        threading.Thread(target=self._caption_worker, args=(narration, destination, script, bool(self.story_first.get())), daemon=True).start()
 
-    def _caption_worker(self, narration, destination, script):
+    def _caption_worker(self, narration, destination, script, story_first):
         try:
-            language = generate_captions(narration, destination, script, self.settings.whisper_model)
+            language = generate_captions(narration, destination, script, self.settings.whisper_model, story_first=story_first)
         except Exception as exc:
             self.after(0, lambda exc=exc: self._finish_error(f"Caption generation failed:\n{exc}"))
             return
@@ -203,9 +206,16 @@ class StudioApp(tk.Tk):
             self._busy(False)
             self.subtitles.set(str(destination))
             self.file_labels["subtitles"].config(text=destination.name)
-            mode = "approved script wording" if script else "Whisper wording"
+            mode = "story-first highlights" if story_first else ("approved script wording" if script else "Whisper wording")
             self.status.set(f"✅ Captions created with {mode}.\n{destination.name}\nLanguage: {language or 'unknown'}")
         self.after(0, done)
+
+    def review_captions(self):
+        if not self.subtitles.get():
+            self.status.set("Generate or choose captions before reviewing them.")
+            return
+        self._open_file(Path(self.subtitles.get()))
+        self.status.set("Caption file opened for review. Save your edits before building.")
 
     def start_build(self):
         title = self.episode_title.get().strip()

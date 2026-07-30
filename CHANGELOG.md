@@ -12,3 +12,11 @@
 ## 0.9.2
 
 - Added portable drawtext caption renderer and `.srt` sidecars.
+
+## 0.9.5 — Story-First Foundation
+- Loop background footage to narration duration plus a 1.5-second visual tail.
+- Continue and fade music through the tail.
+- Add story-first emphasis caption generation.
+- Add caption review workflow.
+- Add composition-aware variable caption placement.
+- Adopt calmer Mother Earth-aligned typography.

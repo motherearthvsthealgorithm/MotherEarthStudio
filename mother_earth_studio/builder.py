@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,41 +82,73 @@ def _escape_filter_path(path: Path) -> str:
 
 def _find_font_file() -> Path | None:
     candidates = [
-        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
-        Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
-        Path("/System/Library/Fonts/Helvetica.ttc"),
-        Path("/Library/Fonts/Arial.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Didot.ttc"),
+        Path("/System/Library/Fonts/Supplemental/Hoefler Text.ttc"),
+        Path("/System/Library/Fonts/NewYork.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Georgia.ttf"),
+        Path("/System/Library/Fonts/HelveticaNeue.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
     ]
     return next((path for path in candidates if path.exists()), None)
 
 
-def _drawtext_filter_graph(subtitles: Path, temp_dir: Path) -> tuple[str, int]:
+def _sample_region_luma(video: Path, timestamp: float, x: float, y: float, w: float = 0.34, h: float = 0.16) -> float:
+    """Return average grayscale luma for a normalized frame region using FFmpeg only."""
+    crop = f"crop=iw*{w:.3f}:ih*{h:.3f}:iw*{x:.3f}:ih*{y:.3f},scale=16:16,format=gray"
+    command = [
+        "ffmpeg", "-v", "error", "-ss", f"{max(0.0, timestamp):.3f}", "-i", str(video),
+        "-frames:v", "1", "-vf", crop, "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, timeout=8)
+        data = result.stdout
+        return sum(data) / len(data) if data else 128.0
+    except Exception:
+        return 128.0
+
+
+def _choose_caption_position(video: Path, start: float, end: float, cue_index: int, previous: str = "") -> tuple[str, str, str]:
+    candidates = [
+        ("upper_left", "w*0.10", "h*0.18", 0.06, 0.12),
+        ("upper_right", "w-text_w-w*0.10", "h*0.18", 0.60, 0.12),
+        ("middle_left", "w*0.10", "h*0.45", 0.06, 0.39),
+        ("middle_right", "w-text_w-w*0.10", "h*0.45", 0.60, 0.39),
+        ("lower_center", "(w-text_w)/2", "h*0.76", 0.33, 0.70),
+    ]
+    timestamp = (start + end) / 2
+    scored = []
+    for name, x_expr, y_expr, x, y in candidates:
+        luma = _sample_region_luma(video, timestamp, x, y)
+        repeat_penalty = 34 if name == previous else 0
+        # Prefer darker breathing room for white type; add a stable tiny tie-breaker.
+        tie = int(hashlib.sha1(f"{cue_index}:{name}".encode()).hexdigest()[:2], 16) / 255
+        scored.append((luma + repeat_penalty + tie, name, x_expr, y_expr))
+    _, name, x_expr, y_expr = min(scored)
+    return name, x_expr, y_expr
+
+
+def _drawtext_filter_graph(subtitles: Path, temp_dir: Path, video: Path) -> tuple[str, int]:
     cues = _parse_srt(subtitles)
     if not cues:
         raise RuntimeError("The selected .srt file contains no readable caption cues.")
     font_file = _find_font_file()
-    font_option = f"fontfile='{_escape_filter_path(font_file)}'" if font_file else "font='Arial'"
+    font_option = f"fontfile='{_escape_filter_path(font_file)}'" if font_file else "font='Georgia'"
     filters: list[str] = []
-    file_index = 0
-    for start, end, text in cues:
-        lines = text.splitlines() or [text]
-        line_count = len(lines)
-        first_y = 0.78 - max(0, line_count - 1) * 0.0275
-        for line_index, line in enumerate(lines):
-            file_index += 1
-            cue_file = temp_dir / f"cue_{file_index:04d}.txt"
-            cue_file.write_text(line, encoding="utf-8")
-            path = _escape_filter_path(cue_file)
-            y_fraction = first_y + line_index * 0.055
-            filters.append(
-                "drawtext="
-                f"textfile='{path}':reload=0:{font_option}:expansion=none:"
-                "fontcolor=white:fontsize=h/30:"
-                "box=1:boxcolor=black@0.72:boxborderw=16:"
-                f"x=(w-text_w)/2:y=h*{y_fraction:.4f}:"
-                f"enable='between(t,{start:.3f},{end:.3f})'"
-            )
+    previous_position = ""
+    for cue_index, (start, end, text) in enumerate(cues, start=1):
+        cue_file = temp_dir / f"cue_{cue_index:04d}.txt"
+        cue_file.write_text(text.replace("\n", " "), encoding="utf-8")
+        path = _escape_filter_path(cue_file)
+        position, x_expr, y_expr = _choose_caption_position(video, start, end, cue_index, previous_position)
+        previous_position = position
+        filters.append(
+            "drawtext="
+            f"textfile='{path}':reload=0:{font_option}:expansion=none:"
+            "fontcolor=white:fontsize=h/24:line_spacing=12:"
+            "borderw=2:bordercolor=black@0.42:shadowx=2:shadowy=2:shadowcolor=black@0.30:"
+            f"x={x_expr}:y={y_expr}:"
+            f"enable='between(t,{start:.3f},{end:.3f})'"
+        )
     return ",".join(filters), len(cues)
 
 
@@ -143,18 +176,21 @@ def build_episode(video: Path, narration: Path, output: Path, system: SystemStat
         raise RuntimeError("Captions must be a standard .srt file.")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "verbose", "-i", str(video), "-i", str(narration)]
+    narration_duration = probe_duration(narration)
+    tail_duration = 1.5
+    final_duration = narration_duration + tail_duration
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "verbose", "-stream_loop", "-1", "-i", str(video), "-i", str(narration)]
     if music:
         command += ["-stream_loop", "-1", "-i", str(music)]
-        duration = probe_duration(narration)
-        fade = min(3.0, max(1.0, duration / 4))
-        fade_out = max(0.0, duration - fade)
+        duration = final_duration
+        fade = min(3.0, max(1.0, narration_duration / 4))
+        fade_out = max(0.0, final_duration - fade)
         volume = max(0.0, min(1.0, music_volume / 100.0))
         audio_filters = (
             f"[1:a]volume=1.0[narration];"
             f"[2:a]volume={volume:.3f},afade=t=in:st=0:d={fade:.2f},"
             f"afade=t=out:st={fade_out:.2f}:d={fade:.2f}[music];"
-            "[narration][music]amix=inputs=2:duration=first:dropout_transition=2[audio]"
+            f"[narration][music]amix=inputs=2:duration=longest:dropout_transition=2,atrim=duration={final_duration:.3f}[audio]"
         )
         command += ["-filter_complex", audio_filters, "-map", "0:v:0", "-map", "[audio]"]
     else:
@@ -176,7 +212,7 @@ def build_episode(video: Path, narration: Path, output: Path, system: SystemStat
         # even though drawtext works when invoked directly.
         if subtitles and burn_captions:
             temp_context = tempfile.TemporaryDirectory(prefix="mother_earth_captions_")
-            graph, cue_count = _drawtext_filter_graph(subtitles, Path(temp_context.name))
+            graph, cue_count = _drawtext_filter_graph(subtitles, Path(temp_context.name), video)
             command += ["-vf", graph]
             renderer = "portable drawtext"
             expected_marker = "drawtext"
@@ -187,7 +223,7 @@ def build_episode(video: Path, narration: Path, output: Path, system: SystemStat
 
         command += [
             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(output)
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{final_duration:.3f}", str(output)
         ]
         result = subprocess.run(command, capture_output=True, text=True)
         stderr = result.stderr or ""

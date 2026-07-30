@@ -4,10 +4,23 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .builder import build_episode, next_output_path
 from .captions import generate_captions
+from .project import (
+    DEFAULT_PROJECTS_ROOT,
+    EpisodeProject,
+    InvalidProjectError,
+    ProjectAlreadyExistsError,
+    ProjectError,
+    create_project,
+    load_project,
+)
+from .recent_projects import (
+    forget_missing_projects,
+    remember_project,
+)
 from .paths import FOREST_DIR, MUSIC_DIR, NARRATION_DIR, OUTPUT_DIR, SCRIPTS_DIR, SUBTITLES_DIR, ensure_folders
 from .settings import load_settings, save_settings
 from .system_check import check_system
@@ -19,8 +32,13 @@ class StudioApp(tk.Tk):
         ensure_folders()
         self.settings = load_settings()
         self.system = check_system()
+        self.current_project: EpisodeProject | None = None
+        self._loading_project = False
+        self._autosave_job = None
+        self.recent_project_paths: list[Path] = []
+        self.recent_project_choice = tk.StringVar()
 
-        self.title("Mother Earth Studio 0.9.6")
+        self.title("Mother Earth Studio 0.10.0")
         self.geometry("1040x780")
         self.minsize(760, 600)
 
@@ -36,6 +54,19 @@ class StudioApp(tk.Tk):
 
         self._build_ui()
         self._show_system_status()
+
+        self.episode_title.trace_add(
+            "write",
+            self._schedule_project_autosave,
+        )
+
+        self.script_text.bind(
+            "<<Modified>>",
+            self._on_script_modified,
+        )
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(100, self._load_startup_project)
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -78,8 +109,64 @@ class StudioApp(tk.Tk):
         self.scroll_canvas.bind("<Enter>", self._enable_mousewheel)
         self.scroll_canvas.bind("<Leave>", self._disable_mousewheel)
 
+        project_bar = ttk.LabelFrame(
+            main,
+            text="Project",
+            style="Section.TLabelframe",
+        )
+        project_bar.grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 10),
+        )
+        project_bar.columnconfigure(2, weight=1)
+
+        ttk.Button(
+            project_bar,
+            text="＋ New Project",
+            command=self.new_project,
+        ).grid(row=0, column=0, padx=(0, 6))
+
+        ttk.Button(
+            project_bar,
+            text="Open Project",
+            command=self.open_project,
+        ).grid(row=0, column=1, padx=(0, 12))
+
+        self.recent_project_menu = ttk.Combobox(
+            project_bar,
+            textvariable=self.recent_project_choice,
+            state="readonly",
+        )
+        self.recent_project_menu.grid(
+            row=0,
+            column=2,
+            sticky="ew",
+        )
+
+        ttk.Button(
+            project_bar,
+            text="Open Recent",
+            command=self.open_recent_project,
+        ).grid(row=0, column=3, padx=(8, 0))
+
+        self.project_location_label = ttk.Label(
+            project_bar,
+            text="No project open",
+            anchor="w",
+        )
+        self.project_location_label.grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            pady=(8, 0),
+        )
+
         episode = ttk.LabelFrame(main, text="Episode Story", style="Section.TLabelframe")
-        episode.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        episode.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         episode.columnconfigure(1, weight=1)
         ttk.Label(episode, text="Title", font=("Helvetica Neue", 11, "bold")).grid(row=0, column=0, sticky="nw", padx=(0, 10))
         ttk.Entry(episode, textvariable=self.episode_title, font=("Helvetica Neue", 12)).grid(row=0, column=1, sticky="ew")
@@ -94,7 +181,7 @@ class StudioApp(tk.Tk):
         ttk.Button(script_area, text="Clear", command=lambda: self.script_text.delete("1.0", "end")).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         media = ttk.LabelFrame(main, text="Media", style="Section.TLabelframe")
-        media.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        media.grid(row=2, column=0, sticky="nsew", padx=(0, 6))
         media.columnconfigure(1, weight=1)
         self.file_labels: dict[str, ttk.Label] = {}
         self._media_row(media, 0, "video", "🌲", "Forest", self.video, FOREST_DIR, (("Video files", "*.mp4 *.mov *.m4v"),))
@@ -112,7 +199,7 @@ class StudioApp(tk.Tk):
         ttk.Button(actions, text="Clear Captions", command=lambda: self._clear("subtitles", self.subtitles, "Captions cleared.")).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         options = ttk.LabelFrame(main, text="Build", style="Section.TLabelframe")
-        options.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        options.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
         options.columnconfigure(0, weight=1)
         options.rowconfigure(8, weight=1)
         ttk.Label(options, text="Music volume", font=("Helvetica Neue", 11, "bold")).grid(row=0, column=0, sticky="w")
@@ -136,7 +223,7 @@ class StudioApp(tk.Tk):
 
         ttk.Label(
             self,
-            text="Mother Earth Studio 0.9.6 • Scrollable Creator Workspace",
+            text="Mother Earth Studio 0.10.0 • Project-Based Creator Workspace",
         ).grid(row=2, column=0, pady=(4, 8))
 
     def _update_scroll_region(self, _event=None) -> None:
@@ -157,6 +244,358 @@ class StudioApp(tk.Tk):
         direction = -1 if event.delta > 0 else 1
         self.scroll_canvas.yview_scroll(direction, "units")
 
+
+    def _refresh_recent_projects(self) -> None:
+        self.recent_project_paths = forget_missing_projects()
+
+        display_values = [
+            f"{path.name} — {path.parent}"
+            for path in self.recent_project_paths
+        ]
+
+        self.recent_project_menu["values"] = display_values
+
+        if display_values:
+            self.recent_project_choice.set(display_values[0])
+        else:
+            self.recent_project_choice.set("")
+
+    def _load_startup_project(self) -> None:
+        self._refresh_recent_projects()
+
+        if not self.recent_project_paths:
+            self.status.set(
+                "Create a new project or open an existing project."
+            )
+            return
+
+        try:
+            self._activate_project(
+                load_project(self.recent_project_paths[0])
+            )
+        except ProjectError as exc:
+            self.status.set(
+                f"Could not reopen the last project: {exc}"
+            )
+
+    def new_project(self) -> None:
+        title = simpledialog.askstring(
+            "New Project",
+            "What is this episode or project called?",
+            parent=self,
+        )
+
+        if title is None:
+            return
+
+        title = title.strip()
+
+        if not title:
+            messagebox.showwarning(
+                "Project title required",
+                "Enter a project title before continuing.",
+                parent=self,
+            )
+            return
+
+        try:
+            project = create_project(
+                title,
+                DEFAULT_PROJECTS_ROOT,
+            )
+        except ProjectAlreadyExistsError:
+            existing_path = (
+                DEFAULT_PROJECTS_ROOT
+                / self._project_slug(title)
+            )
+
+            open_existing = messagebox.askyesno(
+                "Project already exists",
+                "A project with this name already exists. "
+                "Open it instead?",
+                parent=self,
+            )
+
+            if not open_existing:
+                return
+
+            try:
+                project = load_project(existing_path)
+            except ProjectError as exc:
+                messagebox.showerror(
+                    "Could not open project",
+                    str(exc),
+                    parent=self,
+                )
+                return
+        except ProjectError as exc:
+            messagebox.showerror(
+                "Could not create project",
+                str(exc),
+                parent=self,
+            )
+            return
+
+        self._activate_project(project)
+
+    def _project_slug(self, title: str) -> str:
+        import re
+
+        value = title.strip().lower()
+        value = re.sub(r"[^a-z0-9]+", "-", value)
+        return value.strip("-") or "untitled-episode"
+
+    def open_project(self) -> None:
+        selected = filedialog.askdirectory(
+            initialdir=str(DEFAULT_PROJECTS_ROOT),
+            title="Open Mother Earth Studio Project",
+        )
+
+        if not selected:
+            return
+
+        try:
+            project = load_project(Path(selected))
+        except InvalidProjectError as exc:
+            messagebox.showerror(
+                "Not a Studio project",
+                str(exc),
+                parent=self,
+            )
+            return
+        except ProjectError as exc:
+            messagebox.showerror(
+                "Could not open project",
+                str(exc),
+                parent=self,
+            )
+            return
+
+        self._activate_project(project)
+
+    def open_recent_project(self) -> None:
+        selection = self.recent_project_menu.current()
+
+        if selection < 0:
+            return
+
+        try:
+            project_path = self.recent_project_paths[selection]
+            project = load_project(project_path)
+        except (IndexError, ProjectError) as exc:
+            messagebox.showerror(
+                "Could not open recent project",
+                str(exc),
+                parent=self,
+            )
+            self._refresh_recent_projects()
+            return
+
+        self._activate_project(project)
+
+    def _activate_project(
+        self,
+        project: EpisodeProject,
+    ) -> None:
+        if self.current_project is not None:
+            self._save_current_project()
+
+        self._loading_project = True
+        self.current_project = project
+
+        try:
+            self.episode_title.set(project.title)
+
+            script_path = project.file_path("script")
+            script_contents = ""
+
+            if script_path and script_path.exists():
+                script_contents = script_path.read_text(
+                    encoding="utf-8"
+                )
+
+                heading = f"# {project.title}\n\n"
+
+                if script_contents.startswith(heading):
+                    script_contents = script_contents[len(heading):]
+
+            self.script_text.delete("1.0", "end")
+            self.script_text.insert("1.0", script_contents)
+            self.script_text.edit_modified(False)
+
+            for key, variable in (
+                ("video", self.video),
+                ("narration", self.narration),
+                ("music", self.music),
+                ("captions", self.subtitles),
+            ):
+                project_path = project.file_path(key)
+
+                if project_path and project_path.exists():
+                    variable.set(str(project_path))
+
+                    label_key = (
+                        "subtitles"
+                        if key == "captions"
+                        else key
+                    )
+
+                    if label_key in self.file_labels:
+                        self.file_labels[label_key].config(
+                            text=project_path.name
+                        )
+                else:
+                    variable.set("")
+
+                    label_key = (
+                        "subtitles"
+                        if key == "captions"
+                        else key
+                    )
+
+                    if label_key in self.file_labels:
+                        self.file_labels[label_key].config(
+                            text="None selected"
+                        )
+
+            remember_project(project.root)
+            self._refresh_recent_projects()
+
+            self.project_location_label.config(
+                text=str(project.root)
+            )
+
+            self.title(
+                f"Mother Earth Studio 0.10.0 — {project.title}"
+            )
+
+            self.status.set(
+                f"Project opened: {project.title}"
+            )
+        finally:
+            self._loading_project = False
+
+    def _on_script_modified(self, _event=None) -> None:
+        if self._loading_project:
+            self.script_text.edit_modified(False)
+            return
+
+        if self.script_text.edit_modified():
+            self.script_text.edit_modified(False)
+            self._schedule_project_autosave()
+
+    def _schedule_project_autosave(self, *_args) -> None:
+        if self._loading_project:
+            return
+
+        if self.current_project is None:
+            return
+
+        if self._autosave_job is not None:
+            self.after_cancel(self._autosave_job)
+
+        self._autosave_job = self.after(
+            700,
+            self._save_current_project,
+        )
+
+    def _save_current_project(self) -> None:
+        self._autosave_job = None
+
+        project = self.current_project
+
+        if project is None or self._loading_project:
+            return
+
+        try:
+            title = self.episode_title.get().strip()
+
+            if title:
+                project.metadata["title"] = title
+
+            script_path = project.file_path("script")
+
+            if script_path is None:
+                script_path = project.root / "script" / "script.md"
+                project.metadata["files"]["script"] = (
+                    "script/script.md"
+                )
+
+            script_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            script_body = self.script_text.get(
+                "1.0",
+                "end-1c",
+            ).rstrip()
+
+            document = f"# {project.title}\n\n"
+
+            if script_body:
+                document += script_body + "\n"
+
+            script_path.write_text(
+                document,
+                encoding="utf-8",
+            )
+
+            project.save()
+
+            self.project_location_label.config(
+                text=f"{project.root} • Saved"
+            )
+        except (OSError, ProjectError) as exc:
+            self.status.set(
+                f"Project auto-save failed: {exc}"
+            )
+
+    def _store_media_in_project(
+        self,
+        key: str,
+        selected_path: Path,
+    ) -> Path:
+        project = self.current_project
+
+        if project is None:
+            return selected_path
+
+        destination_folder = (
+            project.root / "captions"
+            if key == "subtitles"
+            else project.root / "assets"
+        )
+
+        destination_folder.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        destination = (
+            destination_folder / selected_path.name
+        )
+
+        if selected_path.resolve() != destination.resolve():
+            import shutil
+            shutil.copy2(selected_path, destination)
+
+        metadata_key = (
+            "captions"
+            if key == "subtitles"
+            else key
+        )
+
+        project.set_file(metadata_key, destination)
+
+        return destination
+
+    def _on_close(self) -> None:
+        if self.current_project is not None:
+            self._save_current_project()
+
+        self.destroy()
+
     def _media_row(self, parent, row, key, icon, name, variable, initial_dir, filetypes, optional=False):
         ttk.Label(parent, text=f"{icon}  {name}", font=("Helvetica Neue", 11, "bold")).grid(row=row, column=0, sticky="w", pady=8)
         label = ttk.Label(parent, text="None selected", anchor="w")
@@ -165,14 +604,41 @@ class StudioApp(tk.Tk):
         def choose():
             path = filedialog.askopenfilename(initialdir=str(initial_dir), title=f"Choose {name.lower()}", filetypes=list(filetypes) + [("All files", "*.*")])
             if path:
-                variable.set(path)
-                label.config(text=Path(path).name)
+                selected_path = Path(path)
+
+                try:
+                    stored_path = self._store_media_in_project(
+                        key,
+                        selected_path,
+                    )
+                except (OSError, ProjectError) as exc:
+                    messagebox.showerror(
+                        "Could not add media",
+                        str(exc),
+                        parent=self,
+                    )
+                    return
+
+                variable.set(str(stored_path))
+                label.config(text=stored_path.name)
                 self.status.set(f"{name} selected.")
         ttk.Button(parent, text="Choose", command=choose, width=10).grid(row=row, column=2, sticky="e", pady=8)
 
     def _clear(self, key, variable, message):
         variable.set("")
         self.file_labels[key].config(text="None selected")
+
+        if self.current_project is not None:
+            metadata_key = (
+                "captions"
+                if key == "subtitles"
+                else key
+            )
+            self.current_project.set_file(
+                metadata_key,
+                None,
+            )
+
         self.status.set(message)
 
     def _volume_changed(self, value):

@@ -20,9 +20,9 @@ class StudioApp(tk.Tk):
         self.settings = load_settings()
         self.system = check_system()
 
-        self.title("Mother Earth Studio 0.9.5")
-        self.geometry("980x760")
-        self.minsize(860, 680)
+        self.title("Mother Earth Studio 0.9.6")
+        self.geometry("1040x780")
+        self.minsize(760, 600)
 
         self.video = tk.StringVar()
         self.narration = tk.StringVar()
@@ -55,11 +55,28 @@ class StudioApp(tk.Tk):
         ttk.Label(header, text="🌎 Mother Earth Studio", font=("Helvetica Neue", 24, "bold")).grid(row=0, column=0)
         ttk.Label(header, text="Story first. Technology supports the story.", font=("Helvetica Neue", 11)).grid(row=1, column=0)
 
-        main = ttk.Frame(self, padding=(18, 8, 18, 12))
-        main.grid(row=1, column=0, sticky="nsew")
+        scroll_container = ttk.Frame(self)
+        scroll_container.grid(row=1, column=0, sticky="nsew")
+        scroll_container.columnconfigure(0, weight=1)
+        scroll_container.rowconfigure(0, weight=1)
+
+        self.scroll_canvas = tk.Canvas(scroll_container, highlightthickness=0, borderwidth=0)
+        self.scroll_canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=self.scroll_canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.scroll_canvas.configure(yscrollcommand=scrollbar.set)
+
+        main = ttk.Frame(self.scroll_canvas, padding=(18, 8, 18, 18))
+        self.scroll_window = self.scroll_canvas.create_window((0, 0), window=main, anchor="nw")
+
         main.columnconfigure(0, weight=3)
         main.columnconfigure(1, weight=2)
-        main.rowconfigure(1, weight=1)
+
+        main.bind("<Configure>", self._update_scroll_region)
+        self.scroll_canvas.bind("<Configure>", self._resize_scroll_content)
+        self.scroll_canvas.bind("<Enter>", self._enable_mousewheel)
+        self.scroll_canvas.bind("<Leave>", self._disable_mousewheel)
 
         episode = ttk.LabelFrame(main, text="Episode Story", style="Section.TLabelframe")
         episode.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -117,7 +134,28 @@ class StudioApp(tk.Tk):
         self.build_button.grid(row=8, column=0, sticky="ew")
         ttk.Label(options, textvariable=self.status, anchor="n", justify="left", wraplength=300).grid(row=9, column=0, sticky="nsew", pady=(12, 0))
 
-        ttk.Label(self, text="Mother Earth Studio 0.9.5 • Story-First Foundation").grid(row=2, column=0, pady=(0, 8))
+        ttk.Label(
+            self,
+            text="Mother Earth Studio 0.9.6 • Scrollable Creator Workspace",
+        ).grid(row=2, column=0, pady=(4, 8))
+
+    def _update_scroll_region(self, _event=None) -> None:
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def _resize_scroll_content(self, event) -> None:
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
+
+    def _enable_mousewheel(self, _event=None) -> None:
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _disable_mousewheel(self, _event=None) -> None:
+        self.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event) -> None:
+        if event.delta == 0:
+            return
+        direction = -1 if event.delta > 0 else 1
+        self.scroll_canvas.yview_scroll(direction, "units")
 
     def _media_row(self, parent, row, key, icon, name, variable, initial_dir, filetypes, optional=False):
         ttk.Label(parent, text=f"{icon}  {name}", font=("Helvetica Neue", 11, "bold")).grid(row=row, column=0, sticky="w", pady=8)

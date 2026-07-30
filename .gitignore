@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated output
+Output/
+
+# Temporary backups
+CaptionFix_Backup/
+
+# Local settings (optional)
+.env
+# Local creator assets and settings
+settings.json
+Assets/Forest/
+Assets/Music/
+Assets/Narration/
+Assets/Subtitles/

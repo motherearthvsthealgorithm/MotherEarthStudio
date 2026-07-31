@@ -7,6 +7,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .captions import wrap_caption_text
 from .system_check import SystemStatus
 
 
@@ -49,30 +50,97 @@ def _subtitle_filter(path: Path) -> str:
     return f"subtitles=filename='{escaped}':force_style='{style}'"
 
 
-def _parse_srt(path: Path) -> list[tuple[float, float, str]]:
-    text = path.read_text(encoding="utf-8-sig", errors="replace").replace("\r\n", "\n")
-    blocks = re.split(r"\n\s*\n", text.strip())
-    cues: list[tuple[float, float, str]] = []
-    stamp = re.compile(
-        r"(?P<sh>\d{1,2}):(?P<sm>\d{2}):(?P<ss>\d{2})[,.](?P<sms>\d{3})\s*-->\s*"
-        r"(?P<eh>\d{1,2}):(?P<em>\d{2}):(?P<es>\d{2})[,.](?P<ems>\d{3})"
+def _parse_srt(
+    path: Path,
+) -> list[tuple[float, float, str]]:
+    text = path.read_text(
+        encoding="utf-8-sig",
+        errors="replace",
+    ).replace("\r\n", "\n")
+
+    blocks = re.split(
+        r"\n\s*\n",
+        text.strip(),
     )
+
+    cues: list[
+        tuple[float, float, str]
+    ] = []
+
+    stamp = re.compile(
+        r"(?P<sh>\d{1,2}):"
+        r"(?P<sm>\d{2}):"
+        r"(?P<ss>\d{2})"
+        r"[,.](?P<sms>\d{3})"
+        r"\s*-->\s*"
+        r"(?P<eh>\d{1,2}):"
+        r"(?P<em>\d{2}):"
+        r"(?P<es>\d{2})"
+        r"[,.](?P<ems>\d{3})"
+    )
+
     for block in blocks:
-        lines = [line.rstrip() for line in block.split("\n")]
-        timing_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        lines = [
+            line.rstrip()
+            for line in block.split("\n")
+        ]
+
+        timing_index = next(
+            (
+                index
+                for index, line
+                in enumerate(lines)
+                if "-->" in line
+            ),
+            None,
+        )
+
         if timing_index is None:
             continue
-        match = stamp.search(lines[timing_index])
+
+        match = stamp.search(
+            lines[timing_index]
+        )
+
         if not match:
             continue
-        values = {key: int(value) for key, value in match.groupdict().items()}
-        start = values["sh"] * 3600 + values["sm"] * 60 + values["ss"] + values["sms"] / 1000
-        end = values["eh"] * 3600 + values["em"] * 60 + values["es"] + values["ems"] / 1000
-        caption = " ".join(line.strip() for line in lines[timing_index + 1:] if line.strip())
-        caption = re.sub(r"<[^>]+>", "", caption)
-        caption = textwrap.fill(caption, width=34, break_long_words=False, break_on_hyphens=False)
+
+        values = {
+            key: int(value)
+            for key, value
+            in match.groupdict().items()
+        }
+
+        start = (
+            values["sh"] * 3600
+            + values["sm"] * 60
+            + values["ss"]
+            + values["sms"] / 1000
+        )
+
+        end = (
+            values["eh"] * 3600
+            + values["em"] * 60
+            + values["es"]
+            + values["ems"] / 1000
+        )
+
+        caption_source = " ".join(
+            line.strip()
+            for line
+            in lines[timing_index + 1:]
+            if line.strip()
+        )
+
+        caption = wrap_caption_text(
+            caption_source
+        )
+
         if caption and end > start:
-            cues.append((start, end, caption))
+            cues.append(
+                (start, end, caption)
+            )
+
     return cues
 
 
@@ -82,12 +150,22 @@ def _escape_filter_path(path: Path) -> str:
 
 def _find_font_file() -> Path | None:
     candidates = [
-        Path("/System/Library/Fonts/Supplemental/Didot.ttc"),
-        Path("/System/Library/Fonts/Supplemental/Hoefler Text.ttc"),
-        Path("/System/Library/Fonts/NewYork.ttf"),
-        Path("/System/Library/Fonts/Supplemental/Georgia.ttf"),
-        Path("/System/Library/Fonts/HelveticaNeue.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+        Path(
+            "/System/Library/Fonts/"
+            "HelveticaNeue.ttc"
+        ),
+        Path(
+            "/System/Library/Fonts/"
+            "Helvetica.ttc"
+        ),
+        Path(
+            "/System/Library/Fonts/"
+            "Supplemental/Arial.ttf"
+        ),
+        Path(
+            "/usr/share/fonts/truetype/"
+            "dejavu/DejaVuSans.ttf"
+        ),
     ]
     return next((path for path in candidates if path.exists()), None)
 
@@ -127,29 +205,159 @@ def _choose_caption_position(video: Path, start: float, end: float, cue_index: i
     return name, x_expr, y_expr
 
 
-def _drawtext_filter_graph(subtitles: Path, temp_dir: Path, video: Path) -> tuple[str, int]:
+def _drawtext_filter_graph(
+    subtitles: Path,
+    temp_dir: Path,
+    video: Path,
+) -> tuple[str, int]:
+    """
+    Render captions as one-word-at-a-time emphasis.
+
+    Placement is selected per caption cue by sampling the
+    available video regions and choosing the darkest suitable
+    safe area for white text.
+    """
     cues = _parse_srt(subtitles)
+
     if not cues:
-        raise RuntimeError("The selected .srt file contains no readable caption cues.")
-    font_file = _find_font_file()
-    font_option = f"fontfile='{_escape_filter_path(font_file)}'" if font_file else "font='Georgia'"
-    filters: list[str] = []
-    previous_position = ""
-    for cue_index, (start, end, text) in enumerate(cues, start=1):
-        cue_file = temp_dir / f"cue_{cue_index:04d}.txt"
-        cue_file.write_text(text.replace("\n", " "), encoding="utf-8")
-        path = _escape_filter_path(cue_file)
-        position, x_expr, y_expr = _choose_caption_position(video, start, end, cue_index, previous_position)
-        previous_position = position
-        filters.append(
-            "drawtext="
-            f"textfile='{path}':reload=0:{font_option}:expansion=none:"
-            "fontcolor=white:fontsize=h/24:line_spacing=12:"
-            "borderw=2:bordercolor=black@0.42:shadowx=2:shadowy=2:shadowcolor=black@0.30:"
-            f"x={x_expr}:y={y_expr}:"
-            f"enable='between(t,{start:.3f},{end:.3f})'"
+        raise RuntimeError(
+            "The selected .srt file contains "
+            "no readable caption cues."
         )
-    return ",".join(filters), len(cues)
+
+    font_file = _find_font_file()
+
+    font_option = (
+        "fontfile="
+        f"'{_escape_filter_path(font_file)}'"
+        if font_file
+        else "font='Arial'"
+    )
+
+    filters: list[str] = []
+    rendered_word_count = 0
+    previous_position = ""
+
+    for cue_index, (
+        cue_start,
+        cue_end,
+        cue_text,
+    ) in enumerate(cues, start=1):
+        words = cue_text.replace(
+            "\n",
+            " ",
+        ).split()
+
+        if not words:
+            continue
+
+        position, x_expr, y_expr = (
+            _choose_caption_position(
+                video,
+                cue_start,
+                cue_end,
+                cue_index,
+                previous_position,
+            )
+        )
+
+        previous_position = position
+
+        cue_duration = max(
+            0.20,
+            cue_end - cue_start,
+        )
+
+        word_weights = [
+            max(
+                1.0,
+                min(
+                    2.5,
+                    len(
+                        re.sub(
+                            r"[^\\w']",
+                            "",
+                            word,
+                        )
+                    ) / 4.0,
+                ),
+            )
+            for word in words
+        ]
+
+        total_weight = sum(word_weights)
+        cursor = cue_start
+
+        for word_index, (
+            word,
+            weight,
+        ) in enumerate(
+            zip(words, word_weights),
+            start=1,
+        ):
+            rendered_word_count += 1
+
+            word_duration = (
+                cue_duration
+                * weight
+                / total_weight
+            )
+
+            word_end = (
+                cue_end
+                if word_index == len(words)
+                else cursor + word_duration
+            )
+
+            word_file = (
+                temp_dir
+                / (
+                    f"cue_{cue_index:04d}_"
+                    f"word_{word_index:03d}.txt"
+                )
+            )
+
+            word_file.write_text(
+                word,
+                encoding="utf-8",
+            )
+
+            path = _escape_filter_path(
+                word_file
+            )
+
+            filters.append(
+                "drawtext="
+                f"textfile='{path}':"
+                "reload=0:"
+                f"{font_option}:"
+                "expansion=none:"
+                "fontcolor=white:"
+                "fontsize=h/21:"
+                "borderw=3:"
+                "bordercolor=black@0.88:"
+                "shadowx=2:"
+                "shadowy=3:"
+                "shadowcolor=black@0.70:"
+                f"x={x_expr}:"
+                f"y={y_expr}:"
+                f"enable='between(t,"
+                f"{cursor:.3f},"
+                f"{word_end:.3f})'"
+            )
+
+            cursor = word_end
+
+    if not filters:
+        raise RuntimeError(
+            "Caption rendering produced no "
+            "readable words."
+        )
+
+    return (
+        ",".join(filters),
+        rendered_word_count,
+    )
 
 
 def _copy_sidecar(subtitles: Path, output: Path) -> Path:

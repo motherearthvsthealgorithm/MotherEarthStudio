@@ -24,6 +24,14 @@ from .recent_projects import (
 from .paths import FOREST_DIR, MUSIC_DIR, NARRATION_DIR, OUTPUT_DIR, SCRIPTS_DIR, SUBTITLES_DIR, ensure_folders
 from .settings import load_settings, save_settings
 from .system_check import check_system
+from .visual_timeline import (
+    VisualTimelineItem,
+    deserialize_visual_timeline,
+    detect_visual_kind,
+    remove_visual_item,
+    reorder_visual_items,
+    serialize_visual_timeline,
+)
 
 
 class StudioApp(tk.Tk):
@@ -37,6 +45,7 @@ class StudioApp(tk.Tk):
         self._autosave_job = None
         self.recent_project_paths: list[Path] = []
         self.recent_project_choice = tk.StringVar()
+        self.visual_items: list[VisualTimelineItem] = []
 
         self.title("Mother Earth Studio 0.10.0")
         self.geometry("1040x780")
@@ -184,7 +193,83 @@ class StudioApp(tk.Tk):
         media.grid(row=2, column=0, sticky="nsew", padx=(0, 6))
         media.columnconfigure(1, weight=1)
         self.file_labels: dict[str, ttk.Label] = {}
-        self._media_row(media, 0, "video", "🌲", "Forest", self.video, FOREST_DIR, (("Video files", "*.mp4 *.mov *.m4v"),))
+
+        timeline = ttk.LabelFrame(
+            media,
+            text="Visual Timeline",
+            padding=8,
+        )
+        timeline.grid(
+            row=0,
+            column=0,
+            columnspan=3,
+            sticky="nsew",
+            pady=(0, 10),
+        )
+        timeline.columnconfigure(0, weight=1)
+        timeline.rowconfigure(1, weight=1)
+
+        add_controls = ttk.Frame(timeline)
+        add_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        add_controls.columnconfigure((0, 1), weight=1)
+
+        ttk.Button(
+            add_controls,
+            text="＋ Add Photos",
+            command=self.add_timeline_photos,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        ttk.Button(
+            add_controls,
+            text="＋ Add Videos",
+            command=self.add_timeline_videos,
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        list_area = ttk.Frame(timeline)
+        list_area.grid(row=1, column=0, sticky="nsew")
+        list_area.columnconfigure(0, weight=1)
+        list_area.rowconfigure(0, weight=1)
+
+        self.timeline_list = tk.Listbox(
+            list_area,
+            height=7,
+            exportselection=False,
+            activestyle="dotbox",
+        )
+        self.timeline_list.grid(row=0, column=0, sticky="nsew")
+
+        timeline_scrollbar = ttk.Scrollbar(
+            list_area,
+            orient="vertical",
+            command=self.timeline_list.yview,
+        )
+        timeline_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.timeline_list.configure(
+            yscrollcommand=timeline_scrollbar.set,
+        )
+
+        timeline_controls = ttk.Frame(timeline)
+        timeline_controls.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        timeline_controls.columnconfigure((0, 1, 2), weight=1)
+
+        ttk.Button(
+            timeline_controls,
+            text="↑ Move Up",
+            command=lambda: self.move_timeline_item(-1),
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        ttk.Button(
+            timeline_controls,
+            text="↓ Move Down",
+            command=lambda: self.move_timeline_item(1),
+        ).grid(row=0, column=1, sticky="ew", padx=4)
+
+        ttk.Button(
+            timeline_controls,
+            text="Remove",
+            command=self.remove_selected_timeline_item,
+        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
         self._media_row(media, 1, "narration", "🎙", "Narration", self.narration, NARRATION_DIR, (("Audio files", "*.mp3 *.wav *.m4a *.aac"),))
         self._media_row(media, 2, "music", "🎵", "Music", self.music, MUSIC_DIR, (("Audio files", "*.mp3 *.wav *.m4a *.aac"),), optional=True)
         self._media_row(media, 3, "subtitles", "💬", "Captions", self.subtitles, SUBTITLES_DIR, (("SubRip subtitles", "*.srt"),), optional=True)
@@ -424,7 +509,6 @@ class StudioApp(tk.Tk):
             self.script_text.edit_modified(False)
 
             for key, variable in (
-                ("video", self.video),
                 ("narration", self.narration),
                 ("music", self.music),
                 ("captions", self.subtitles),
@@ -457,6 +541,8 @@ class StudioApp(tk.Tk):
                         self.file_labels[label_key].config(
                             text="None selected"
                         )
+
+            self._load_project_timeline(project)
 
             remember_project(project.root)
             self._refresh_recent_projects()
@@ -541,6 +627,10 @@ class StudioApp(tk.Tk):
                 encoding="utf-8",
             )
 
+            project.metadata["visual_timeline"] = (
+                self._serialize_timeline_for_project(project)
+            )
+
             project.save()
 
             self.project_location_label.config(
@@ -589,6 +679,272 @@ class StudioApp(tk.Tk):
         project.set_file(metadata_key, destination)
 
         return destination
+
+    def _serialize_timeline_for_project(
+        self,
+        project: EpisodeProject,
+    ) -> list[dict]:
+        records = serialize_visual_timeline(self.visual_items)
+
+        for record in records:
+            path = Path(str(record["path"]))
+
+            try:
+                record["path"] = project.relative_path(path)
+            except ProjectError:
+                record["path"] = str(path)
+
+        return records
+
+    def _load_project_timeline(
+        self,
+        project: EpisodeProject,
+    ) -> None:
+        records = project.metadata.get("visual_timeline", [])
+
+        if not isinstance(records, list):
+            records = []
+
+        resolved_records: list[dict] = []
+
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            resolved = dict(record)
+            stored_path = Path(str(resolved.get("path", "")))
+
+            if stored_path and not stored_path.is_absolute():
+                try:
+                    resolved["path"] = str(
+                        project.resolve(stored_path.as_posix())
+                    )
+                except ProjectError:
+                    continue
+
+            resolved_records.append(resolved)
+
+        try:
+            self.visual_items = deserialize_visual_timeline(
+                resolved_records
+            )
+        except (TypeError, ValueError):
+            self.visual_items = []
+
+        if not self.visual_items:
+            legacy_video = project.file_path("video")
+
+            if legacy_video and legacy_video.exists():
+                self.visual_items = [
+                    VisualTimelineItem(
+                        path=str(legacy_video),
+                        kind="video",
+                        order=0,
+                        loop=True,
+                    )
+                ]
+
+        self._refresh_timeline_list()
+        self._sync_legacy_video_source()
+
+    def _store_visual_asset(
+        self,
+        selected_path: Path,
+    ) -> Path:
+        project = self.current_project
+
+        if project is None:
+            return selected_path.resolve()
+
+        destination_folder = project.root / "assets"
+        destination_folder.mkdir(parents=True, exist_ok=True)
+        destination = destination_folder / selected_path.name
+
+        if (
+            destination.exists()
+            and selected_path.resolve() != destination.resolve()
+        ):
+            counter = 2
+
+            while destination.exists():
+                destination = (
+                    destination_folder
+                    / f"{selected_path.stem}-{counter}{selected_path.suffix}"
+                )
+                counter += 1
+
+        if selected_path.resolve() != destination.resolve():
+            import shutil
+            shutil.copy2(selected_path, destination)
+
+        return destination.resolve()
+
+    def _add_timeline_paths(
+        self,
+        selected_paths,
+    ) -> None:
+        if not selected_paths:
+            return
+
+        added = 0
+
+        for selected in selected_paths:
+            source = Path(selected)
+
+            try:
+                stored = self._store_visual_asset(source)
+                kind = detect_visual_kind(stored)
+            except (OSError, ProjectError, ValueError) as exc:
+                messagebox.showerror(
+                    "Could not add visual asset",
+                    str(exc),
+                    parent=self,
+                )
+                continue
+
+            self.visual_items.append(
+                VisualTimelineItem(
+                    path=str(stored),
+                    kind=kind,
+                    order=len(self.visual_items),
+                )
+            )
+            added += 1
+
+        if not added:
+            return
+
+        self._refresh_timeline_list()
+        self._sync_legacy_video_source()
+        self._schedule_project_autosave()
+        self.status.set(
+            f"Added {added} visual asset"
+            f"{'s' if added != 1 else ''} to the timeline."
+        )
+
+    def add_timeline_photos(self) -> None:
+        selected = filedialog.askopenfilenames(
+            initialdir=str(FOREST_DIR),
+            title="Add photos to the visual timeline",
+            filetypes=[
+                (
+                    "Image files",
+                    "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff",
+                ),
+                ("All files", "*.*"),
+            ],
+        )
+        self._add_timeline_paths(selected)
+
+    def add_timeline_videos(self) -> None:
+        selected = filedialog.askopenfilenames(
+            initialdir=str(FOREST_DIR),
+            title="Add videos to the visual timeline",
+            filetypes=[
+                ("Video files", "*.mp4 *.mov *.m4v"),
+                ("All files", "*.*"),
+            ],
+        )
+        self._add_timeline_paths(selected)
+
+    def _selected_timeline_index(self) -> int | None:
+        selection = self.timeline_list.curselection()
+
+        if not selection:
+            self.status.set(
+                "Select a visual timeline item first."
+            )
+            return None
+
+        return int(selection[0])
+
+    def move_timeline_item(self, direction: int) -> None:
+        source_index = self._selected_timeline_index()
+
+        if source_index is None:
+            return
+
+        destination_index = source_index + direction
+
+        if not 0 <= destination_index < len(self.visual_items):
+            return
+
+        self.visual_items = reorder_visual_items(
+            self.visual_items,
+            source_index,
+            destination_index,
+        )
+        self._refresh_timeline_list(destination_index)
+        self._sync_legacy_video_source()
+        self._schedule_project_autosave()
+
+    def remove_selected_timeline_item(self) -> None:
+        selected_index = self._selected_timeline_index()
+
+        if selected_index is None:
+            return
+
+        self.visual_items = remove_visual_item(
+            self.visual_items,
+            selected_index,
+        )
+
+        next_index = min(
+            selected_index,
+            len(self.visual_items) - 1,
+        )
+
+        self._refresh_timeline_list(
+            next_index if next_index >= 0 else None
+        )
+        self._sync_legacy_video_source()
+        self._schedule_project_autosave()
+        self.status.set("Visual asset removed from the timeline.")
+
+    def _refresh_timeline_list(
+        self,
+        selected_index: int | None = None,
+    ) -> None:
+        self.timeline_list.delete(0, "end")
+
+        for index, item in enumerate(self.visual_items, start=1):
+            icon = "PHOTO" if item.kind == "image" else "VIDEO"
+            self.timeline_list.insert(
+                "end",
+                f"{index}. [{icon}] {Path(item.path).name}",
+            )
+
+        if (
+            selected_index is not None
+            and 0 <= selected_index < len(self.visual_items)
+        ):
+            self.timeline_list.selection_set(selected_index)
+            self.timeline_list.activate(selected_index)
+            self.timeline_list.see(selected_index)
+
+    def _sync_legacy_video_source(self) -> None:
+        first_video = next(
+            (
+                Path(item.path)
+                for item in self.visual_items
+                if item.kind == "video"
+            ),
+            None,
+        )
+
+        self.video.set(str(first_video) if first_video else "")
+
+        if self.current_project is not None:
+            if first_video and first_video.exists():
+                self.current_project.set_file(
+                    "video",
+                    first_video,
+                )
+            else:
+                self.current_project.set_file(
+                    "video",
+                    None,
+                )
 
     def _on_close(self) -> None:
         if self.current_project is not None:
@@ -723,8 +1079,23 @@ class StudioApp(tk.Tk):
 
     def start_build(self):
         title = self.episode_title.get().strip()
-        if not title or not self.video.get() or not self.narration.get():
-            self.status.set("Episode title, forest video, and narration are required.")
+        if not title or not self.narration.get():
+            self.status.set(
+                "Episode title and narration are required."
+            )
+            return
+
+        if not self.visual_items:
+            self.status.set(
+                "Add at least one photo or video to the visual timeline."
+            )
+            return
+
+        if not self.video.get():
+            self.status.set(
+                "Photo-only timeline rendering is the next increment. "
+                "Add a video to keep using the current builder for now."
+            )
             return
         self.settings.music_volume = int(self.music_volume.get())
         self.settings.burn_captions_when_supported = bool(self.burn_captions.get())

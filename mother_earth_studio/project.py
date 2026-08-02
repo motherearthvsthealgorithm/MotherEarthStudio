@@ -176,6 +176,7 @@ def create_project(
             "music": None,
             "captions": None,
         },
+        "visual_timeline": [],
         "exports": [],
         "publishing": {},
     }

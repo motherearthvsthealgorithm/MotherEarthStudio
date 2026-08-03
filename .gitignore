@@ -20,3 +20,18 @@ Assets/Forest/
 Assets/Music/
 Assets/Narration/
 Assets/Subtitles/
+
+# Local development artifacts
+.v*-backup-*/
+_release_backups/
+_update_backups/
+MotherEarthStudio_Source/
+MotherEarthStudio_Source.zip
+MotherEarthStudio_v*_Update/
+MotherEarthStudio_v*/
+*.patch
+*-current-source.txt
+*_source.txt
+*-ui-verification.txt
+install_v*.py
+Assets/Scripts/

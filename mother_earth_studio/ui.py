@@ -7,7 +7,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .builder import build_episode, next_output_path
+from .brand_identity import BrandIdentity, generate_cover
+from .timeline_build import prepare_visual_source
 from .captions import generate_captions
+from .story_highlights_editor import StoryHighlightsEditor
 from .project import (
     DEFAULT_PROJECTS_ROOT,
     EpisodeProject,
@@ -47,7 +50,7 @@ class StudioApp(tk.Tk):
         self.recent_project_choice = tk.StringVar()
         self.visual_items: list[VisualTimelineItem] = []
 
-        self.title("Mother Earth Studio 0.10.0")
+        self.title("Mother Earth Studio 0.11.3")
         self.geometry("1040x780")
         self.minsize(760, 600)
 
@@ -56,6 +59,8 @@ class StudioApp(tk.Tk):
         self.music = tk.StringVar()
         self.subtitles = tk.StringVar()
         self.episode_title = tk.StringVar()
+        self.cover_headline = tk.StringVar()
+        self.cover_source = tk.StringVar()
         self.music_volume = tk.DoubleVar(value=self.settings.music_volume)
         self.burn_captions = tk.BooleanVar(value=self.settings.burn_captions_when_supported)
         self.story_first = tk.BooleanVar(value=True)
@@ -65,6 +70,10 @@ class StudioApp(tk.Tk):
         self._show_system_status()
 
         self.episode_title.trace_add(
+            "write",
+            self._schedule_project_autosave,
+        )
+        self.cover_headline.trace_add(
             "write",
             self._schedule_project_autosave,
         )
@@ -272,16 +281,68 @@ class StudioApp(tk.Tk):
 
         self._media_row(media, 1, "narration", "🎙", "Narration", self.narration, NARRATION_DIR, (("Audio files", "*.mp3 *.wav *.m4a *.aac"),))
         self._media_row(media, 2, "music", "🎵", "Music", self.music, MUSIC_DIR, (("Audio files", "*.mp3 *.wav *.m4a *.aac"),), optional=True)
-        self._media_row(media, 3, "subtitles", "💬", "Captions", self.subtitles, SUBTITLES_DIR, (("SubRip subtitles", "*.srt"),), optional=True)
+        self._media_row(media, 3, "subtitles", "💬", "Story Overlays", self.subtitles, SUBTITLES_DIR, (("Story highlights (primary) or SRT fallback", "*.json *.srt"),), optional=True)
 
         actions = ttk.Frame(media)
         actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        actions.columnconfigure((0, 1, 2, 3), weight=1)
-        self.caption_button = ttk.Button(actions, text="Generate Captions", command=self.start_caption_generation)
+        actions.columnconfigure((0, 1, 2, 3, 4), weight=1)
+        self.caption_button = ttk.Button(actions, text="Generate Transcript", command=self.start_caption_generation)
         self.caption_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(actions, text="Review Captions", command=self.review_captions).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(actions, text="Clear Music", command=lambda: self._clear("music", self.music, "Music cleared.")).grid(row=0, column=2, sticky="ew", padx=4)
-        ttk.Button(actions, text="Clear Captions", command=lambda: self._clear("subtitles", self.subtitles, "Captions cleared.")).grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        ttk.Button(actions, text="Story Highlights", command=self.open_story_highlights).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(actions, text="Review Overlay Source", command=self.review_captions).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(actions, text="Clear Music", command=lambda: self._clear("music", self.music, "Music cleared.")).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(actions, text="Clear Text", command=lambda: self._clear("subtitles", self.subtitles, "Story overlays cleared.")).grid(row=0, column=4, sticky="ew", padx=(4, 0))
+
+        branding = ttk.LabelFrame(
+            main,
+            text="Brand Identity & Cover",
+            style="Section.TLabelframe",
+        )
+        branding.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(10, 0),
+        )
+        branding.columnconfigure(1, weight=1)
+        ttk.Label(
+            branding,
+            text="Opening",
+            font=("Helvetica Neue", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(
+            branding,
+            text="Mother Earth vs. The Algorithm — I'm here to ask different questions.",
+            wraplength=700,
+            justify="left",
+        ).grid(row=0, column=1, columnspan=2, sticky="w")
+        ttk.Label(
+            branding,
+            text="Cover headline",
+            font=("Helvetica Neue", 11, "bold"),
+        ).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
+        ttk.Entry(
+            branding,
+            textvariable=self.cover_headline,
+        ).grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            branding,
+            text="Use Selected Visual",
+            command=self.use_selected_visual_for_cover,
+        ).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
+        self.cover_source_label = ttk.Label(
+            branding,
+            text="Cover source: first timeline visual",
+            anchor="w",
+        )
+        self.cover_source_label.grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(6, 0),
+        )
 
         options = ttk.LabelFrame(main, text="Build", style="Section.TLabelframe")
         options.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
@@ -308,8 +369,8 @@ class StudioApp(tk.Tk):
 
         ttk.Label(
             self,
-            text="Mother Earth Studio 0.10.0 • Project-Based Creator Workspace",
-        ).grid(row=2, column=0, pady=(4, 8))
+            text="Mother Earth Studio 0.11.3 • Editor Workflow Polish",
+        ).grid(row=4, column=0, pady=(4, 8))
 
     def _update_scroll_region(self, _event=None) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
@@ -490,6 +551,22 @@ class StudioApp(tk.Tk):
 
         try:
             self.episode_title.set(project.title)
+            branding = project.metadata.get("branding", {})
+            self.cover_headline.set(
+                str(branding.get("cover_headline") or project.title)
+            )
+            stored_cover_source = branding.get("cover_source")
+            if stored_cover_source:
+                try:
+                    resolved_cover = project.resolve(
+                        str(stored_cover_source)
+                    )
+                    self.cover_source.set(str(resolved_cover))
+                except ProjectError:
+                    self.cover_source.set("")
+            else:
+                self.cover_source.set("")
+            self._refresh_cover_source_label()
 
             script_path = project.file_path("script")
             script_contents = ""
@@ -552,7 +629,7 @@ class StudioApp(tk.Tk):
             )
 
             self.title(
-                f"Mother Earth Studio 0.10.0 — {project.title}"
+                f"Mother Earth Studio 0.11.3 — {project.title}"
             )
 
             self.status.set(
@@ -629,6 +706,24 @@ class StudioApp(tk.Tk):
 
             project.metadata["visual_timeline"] = (
                 self._serialize_timeline_for_project(project)
+            )
+            branding = project.metadata.setdefault("branding", {})
+            cover_source = None
+            if self.cover_source.get():
+                cover_source = project.relative_path(
+                    Path(self.cover_source.get())
+                )
+            branding.update(
+                {
+                    "enabled": True,
+                    "title": "Mother Earth vs. The Algorithm",
+                    "tagline": "I'm here to ask different questions.",
+                    "intro_duration": 3.5,
+                    "cover_headline": (
+                        self.cover_headline.get().strip() or title
+                    ),
+                    "cover_source": cover_source,
+                }
             )
 
             project.save()
@@ -922,6 +1017,8 @@ class StudioApp(tk.Tk):
             self.timeline_list.activate(selected_index)
             self.timeline_list.see(selected_index)
 
+        self._refresh_build_readiness()
+
     def _sync_legacy_video_source(self) -> None:
         first_video = next(
             (
@@ -945,6 +1042,40 @@ class StudioApp(tk.Tk):
                     "video",
                     None,
                 )
+
+    def _refresh_cover_source_label(self) -> None:
+        if self.cover_source.get():
+            name = Path(self.cover_source.get()).name
+            self.cover_source_label.config(
+                text=f"Cover source: {name}"
+            )
+        else:
+            self.cover_source_label.config(
+                text="Cover source: first timeline visual"
+            )
+
+    def use_selected_visual_for_cover(self) -> None:
+        selected_index = self._selected_timeline_index()
+        if selected_index is None:
+            return
+        selected = Path(self.visual_items[selected_index].path)
+        self.cover_source.set(str(selected))
+        self._refresh_cover_source_label()
+        self._schedule_project_autosave()
+        self.status.set(
+            f"Cover source selected: {selected.name}"
+        )
+
+    def _cover_source_path(self, visual_items) -> Path | None:
+        if self.cover_source.get():
+            candidate = Path(self.cover_source.get())
+            if candidate.exists():
+                return candidate
+        if visual_items:
+            candidate = Path(visual_items[0].path)
+            if candidate.exists():
+                return candidate
+        return None
 
     def _on_close(self) -> None:
         if self.current_project is not None:
@@ -978,6 +1109,7 @@ class StudioApp(tk.Tk):
                 variable.set(str(stored_path))
                 label.config(text=stored_path.name)
                 self.status.set(f"{name} selected.")
+        self._refresh_build_readiness()
         ttk.Button(parent, text="Choose", command=choose, width=10).grid(row=row, column=2, sticky="e", pady=8)
 
     def _clear(self, key, variable, message):
@@ -1070,12 +1202,152 @@ class StudioApp(tk.Tk):
             self.status.set(f"✅ Captions created with {mode}.\n{destination.name}\nLanguage: {language or 'unknown'}")
         self.after(0, done)
 
+    def _build_readiness_summary(self) -> str:
+        visual_count = len(self.visual_items)
+        photo_count = sum(
+            item.kind == "image"
+            for item in self.visual_items
+        )
+        video_count = sum(
+            item.kind == "video"
+            for item in self.visual_items
+        )
+
+        missing: list[str] = []
+        if not self.episode_title.get().strip():
+            missing.append("title")
+        if not visual_count:
+            missing.append("visuals")
+        if not self.narration.get():
+            missing.append("narration")
+
+        if missing:
+            heading = "Not ready: add " + ", ".join(missing)
+        elif photo_count == visual_count:
+            heading = "Ready to build a photo reel"
+        elif video_count == 1 and visual_count == 1:
+            heading = "Ready to build a video episode"
+        else:
+            heading = "Timeline needs attention before building"
+
+        if photo_count == visual_count and visual_count:
+            timeline = f"{photo_count} photo"
+            timeline += "s" if photo_count != 1 else ""
+        elif video_count == visual_count and visual_count:
+            timeline = f"{video_count} video"
+            timeline += "s" if video_count != 1 else ""
+        elif visual_count:
+            timeline = (
+                f"{photo_count} photos + {video_count} videos"
+            )
+        else:
+            timeline = "empty"
+
+        narration = (
+            Path(self.narration.get()).name
+            if self.narration.get()
+            else "not selected"
+        )
+        music = (
+            Path(self.music.get()).name
+            if self.music.get()
+            else "none"
+        )
+        captions = (
+            Path(self.subtitles.get()).name
+            if self.subtitles.get()
+            else "none"
+        )
+
+        return (
+            f"{heading}\n"
+            f"Timeline: {timeline}\n"
+            f"Narration: {narration}\n"
+            f"Music: {music}\n"
+            f"Story overlays: {captions}"
+        )
+
+    def _refresh_build_readiness(self) -> None:
+        self.status.set(self._build_readiness_summary())
+
+    def open_story_highlights(self):
+        current = Path(self.subtitles.get()) if self.subtitles.get() else None
+        source_srt = current if current and current.suffix.lower() == ".srt" else None
+        if source_srt is None and self.current_project:
+            candidates = sorted((self.current_project.root / "captions").glob("*.srt"), key=lambda p: p.stat().st_mtime, reverse=True)
+            source_srt = candidates[0] if candidates else None
+        if self.current_project:
+            destination = self.current_project.root / "captions" / "story_highlights.json"
+        else:
+            destination = SUBTITLES_DIR / "story_highlights.json"
+        def saved(path):
+            self.subtitles.set(str(path))
+            self.file_labels["subtitles"].config(text=path.name)
+            if self.current_project:
+                self.current_project.set_file("captions", path)
+            self.status.set("✅ Story highlights approved. Build will render only this editorial overlay track.")
+        preview_source = Path(self.video.get()) if self.video.get() else None
+        if preview_source is None and self.visual_items:
+            preview_source = Path(self.visual_items[0].path)
+        StoryHighlightsEditor(
+            self,
+            destination,
+            source_srt=source_srt,
+            on_saved=saved,
+            preview_source=preview_source,
+            ffmpeg_path=self.system.ffmpeg_path or "ffmpeg",
+        )
+
     def review_captions(self):
         if not self.subtitles.get():
-            self.status.set("Generate or choose captions before reviewing them.")
+            message = (
+                "Generate or choose captions before reviewing them."
+            )
+            self.status.set(message)
+            messagebox.showwarning(
+                "Mother Earth Studio",
+                message,
+                parent=self,
+            )
             return
-        self._open_file(Path(self.subtitles.get()))
-        self.status.set("Caption file opened for review. Save your edits before building.")
+
+        caption_path = Path(self.subtitles.get())
+
+        if caption_path.suffix.lower() == ".json":
+            self.open_story_highlights()
+            return
+
+        if self._open_file(caption_path):
+            self.status.set(
+                "Caption file opened for review. "
+                "Save your edits before building."
+            )
+            return
+
+        if self._reveal_file(caption_path):
+            message = (
+                "No default application is assigned to .srt files. "
+                "Mother Earth Studio revealed the caption file in "
+                "Finder instead."
+            )
+            self.status.set(message)
+            messagebox.showinfo(
+                "Caption file revealed",
+                message,
+                parent=self,
+            )
+            return
+
+        message = (
+            "Mother Earth Studio could not open or reveal the "
+            f"selected caption file:\n{caption_path}"
+        )
+        self.status.set(message)
+        messagebox.showerror(
+            "Could not access captions",
+            message,
+            parent=self,
+        )
 
     def start_build(self):
         title = self.episode_title.get().strip()
@@ -1091,12 +1363,6 @@ class StudioApp(tk.Tk):
             )
             return
 
-        if not self.video.get():
-            self.status.set(
-                "Photo-only timeline rendering is the next increment. "
-                "Add a video to keep using the current builder for now."
-            )
-            return
         self.settings.music_volume = int(self.music_volume.get())
         self.settings.burn_captions_when_supported = bool(self.burn_captions.get())
         save_settings(self.settings)
@@ -1104,28 +1370,105 @@ class StudioApp(tk.Tk):
         self._busy(True)
         self.status.set(f"Building Episode {number:03d}...")
         kwargs = dict(
-            video=Path(self.video.get()), narration=Path(self.narration.get()), output=output,
-            system=self.system, music=Path(self.music.get()) if self.music.get() else None,
+            narration=Path(self.narration.get()),
+            output=output,
+            system=self.system,
+            music=Path(self.music.get()) if self.music.get() else None,
             subtitles=Path(self.subtitles.get()) if self.subtitles.get() else None,
-            music_volume=int(self.music_volume.get()), burn_captions=bool(self.burn_captions.get()),
+            music_volume=int(self.music_volume.get()),
+            burn_captions=bool(self.burn_captions.get()),
         )
-        threading.Thread(target=self._build_worker, args=(number, kwargs), daemon=True).start()
+        visual_items = list(self.visual_items)
+        identity = BrandIdentity()
+        cover_headline = (
+            self.cover_headline.get().strip() or title
+        )
+        cover_source = self._cover_source_path(visual_items)
+        cache_dir = (
+            self.current_project.root / "assets" / ".generated"
+            if self.current_project is not None
+            else OUTPUT_DIR / ".generated"
+        )
+        threading.Thread(
+            target=self._build_worker,
+            args=(number, visual_items, cache_dir, identity, cover_headline, cover_source, kwargs),
+            daemon=True,
+        ).start()
 
-    def _build_worker(self, number, kwargs):
+    def _build_worker(
+        self,
+        number,
+        visual_items,
+        cache_dir,
+        identity,
+        cover_headline,
+        cover_source,
+        kwargs,
+    ):
         try:
-            result = build_episode(**kwargs)
+            prepared = prepare_visual_source(
+                visual_items,
+                kwargs["narration"],
+                cache_dir,
+                ffmpeg_path=(
+                    getattr(self.system, "ffmpeg_path", None)
+                    or "ffmpeg"
+                ),
+            )
+            build_kwargs = dict(kwargs)
+            build_kwargs["video"] = prepared.path
+            build_kwargs["brand_identity"] = identity
+            result = build_episode(**build_kwargs)
+            cover_output = None
+            if cover_source is not None:
+                cover_dir = (
+                    self.current_project.root / "covers"
+                    if self.current_project is not None
+                    else OUTPUT_DIR / "covers"
+                )
+                cover_output = cover_dir / (
+                    f"{result.output.stem}-cover.png"
+                )
+                generate_cover(
+                    cover_source,
+                    cover_output,
+                    cover_headline,
+                    identity,
+                    ffmpeg_path=(
+                        getattr(self.system, "ffmpeg_path", None)
+                        or "ffmpeg"
+                    ),
+                )
+                if self.current_project is not None:
+                    branding = self.current_project.metadata.setdefault(
+                        "branding",
+                        {},
+                    )
+                    branding["cover_output"] = (
+                        self.current_project.relative_path(cover_output)
+                    )
+                    self.current_project.save()
         except Exception as exc:
             self.after(0, lambda exc=exc: self._finish_error(f"Episode build failed:\n{exc}"))
             return
         def done():
             self._busy(False)
             message = f"✅ Episode {number:03d} created\n{result.output.name}"
+            if prepared.generated:
+                message += (
+                    f"\n\nPhoto reel created from "
+                    f"{prepared.image_count} images."
+                )
             if result.warning:
                 message += f"\n\n{result.warning}"
             elif kwargs.get("subtitles") and result.captions_burned:
                 message += f"\n\n✅ Captions visibly burned using {result.caption_renderer}."
             elif kwargs.get("subtitles"):
                 message += "\n\n⚠️ MP4 created without burned captions."
+            if cover_output is not None:
+                message += (
+                    f"\n\nCover created: {cover_output.name}"
+                )
             if result.log_path:
                 message += f"\nBuild log: {result.log_path.name}"
             self.status.set(message)
@@ -1137,16 +1480,55 @@ class StudioApp(tk.Tk):
         self.status.set(message)
         messagebox.showerror("Mother Earth Studio", message)
 
-    def _open_file(self, path: Path):
+    def _open_file(self, path: Path) -> bool:
+        path = Path(path)
+
+        if not path.exists():
+            return False
+
         try:
             if sys.platform == "darwin":
-                subprocess.Popen(["open", str(path)])
-            elif os.name == "nt":
+                completed = subprocess.run(
+                    ["open", str(path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.returncode == 0
+
+            if os.name == "nt":
                 os.startfile(path)
-            else:
-                subprocess.Popen(["xdg-open", str(path)])
+                return True
+
+            completed = subprocess.run(
+                ["xdg-open", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode == 0
         except Exception:
-            pass
+            return False
+
+    def _reveal_file(self, path: Path) -> bool:
+        path = Path(path)
+
+        if not path.exists():
+            return False
+
+        try:
+            if sys.platform == "darwin":
+                completed = subprocess.run(
+                    ["open", "-R", str(path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.returncode == 0
+
+            return self._open_file(path.parent)
+        except Exception:
+            return False
 
 
 def run() -> None:

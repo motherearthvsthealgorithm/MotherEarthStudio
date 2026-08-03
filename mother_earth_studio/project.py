@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-PROJECT_VERSION = "0.10.0"
+PROJECT_VERSION = "0.11.3"
 PROJECT_FILENAME = "project.json"
 
 DEFAULT_PROJECTS_ROOT = (
@@ -24,6 +24,7 @@ PROJECT_FOLDERS = (
     "exports",
     "publishing",
     "notes",
+    "covers",
 )
 
 
@@ -179,6 +180,15 @@ def create_project(
         "visual_timeline": [],
         "exports": [],
         "publishing": {},
+        "branding": {
+            "enabled": True,
+            "title": "Mother Earth vs. The Algorithm",
+            "tagline": "I'm here to ask different questions.",
+            "intro_duration": 4.5,
+            "cover_headline": cleaned_title,
+            "cover_source": None,
+            "cover_output": None,
+        },
     }
 
     project = EpisodeProject(

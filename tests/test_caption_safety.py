@@ -163,8 +163,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class WordPopRendererTests(unittest.TestCase):
-    def test_word_pop_has_no_background_box(self):
+class CinematicPhraseRendererTests(unittest.TestCase):
+    def test_cinematic_phrase_has_no_background_box(self):
         import tempfile
 
         from mother_earth_studio.builder import (
@@ -193,12 +193,12 @@ class WordPopRendererTests(unittest.TestCase):
 
             self.assertEqual(
                 word_count,
-                4,
+                1,
             )
 
             self.assertEqual(
                 graph.count("drawtext="),
-                4,
+                1,
             )
 
             self.assertNotIn(
@@ -207,6 +207,6 @@ class WordPopRendererTests(unittest.TestCase):
             )
 
             self.assertIn(
-                "borderw=3",
+                "borderw=1",
                 graph,
             )

@@ -9,6 +9,12 @@ from pathlib import Path
 
 from .captions import wrap_caption_text
 from .system_check import SystemStatus
+from .brand_identity import BrandIdentity, build_brand_filter
+from .story_first_caption_engine import (
+    DEFAULT_STORY_CAPTION_STYLE,
+    write_overlay_text_files,
+)
+from .overlay_timeline import build_overlay_timeline, SUPPORTED_OVERLAY_SUFFIXES
 
 
 @dataclass
@@ -209,159 +215,65 @@ def _drawtext_filter_graph(
     subtitles: Path,
     temp_dir: Path,
     video: Path,
+    time_offset: float = 0.0,
 ) -> tuple[str, int]:
-    """
-    Render captions as one-word-at-a-time emphasis.
+    """Render stable, balanced editorial overlays with gentle fades."""
+    del video  # v2.0 intentionally uses stable placement instead of random movement.
+    cues = None
+    if subtitles.suffix.lower() == ".srt":
+        cues = _parse_srt(subtitles)
+        if not cues:
+            raise RuntimeError(
+                "The selected .srt file contains no readable transcript cues."
+            )
+    timeline = build_overlay_timeline(
+        subtitles,
+        srt_cues=cues,
+        time_offset=time_offset,
+    )
+    overlays = timeline.overlays
 
-    Placement is selected per caption cue by sampling the
-    available video regions and choosing the darkest suitable
-    safe area for white text.
-    """
-    cues = _parse_srt(subtitles)
-
-    if not cues:
-        raise RuntimeError(
-            "The selected .srt file contains "
-            "no readable caption cues."
-        )
-
+    files = write_overlay_text_files(overlays, temp_dir)
     font_file = _find_font_file()
-
     font_option = (
-        "fontfile="
-        f"'{_escape_filter_path(font_file)}'"
-        if font_file
-        else "font='Arial'"
+        "fontfile=" f"'{_escape_filter_path(font_file)}'"
+        if font_file else "font='Arial'"
     )
 
     filters: list[str] = []
-    rendered_word_count = 0
-    previous_position = ""
-
-    for cue_index, (
-        cue_start,
-        cue_end,
-        cue_text,
-    ) in enumerate(cues, start=1):
-        words = cue_text.replace(
-            "\n",
-            " ",
-        ).split()
-
-        if not words:
-            continue
-
-        position, x_expr, y_expr = (
-            _choose_caption_position(
-                video,
-                cue_start,
-                cue_end,
-                cue_index,
-                previous_position,
-            )
+    for overlay, text_file in zip(overlays, files):
+        start = float(overlay["start"])
+        end = float(overlay["end"])
+        fade = float(overlay.get("fade_duration", DEFAULT_STORY_CAPTION_STYLE.fade_duration))
+        position = overlay.get("position", "lower_center")
+        y = {"upper_center": 0.18, "middle_center": 0.45, "lower_center": 0.735}.get(position, 0.735)
+        divisor = int(overlay["font_divisor"])
+        path = _escape_filter_path(text_file)
+        alpha = (
+            r"if(lt(t\," + f"{start + fade:.3f}" + r")\," +
+            f"(t-{start:.3f})/{fade:.3f}" + r"\," +
+            r"if(gt(t\," + f"{end - fade:.3f}" + r")\," +
+            f"({end:.3f}-t)/{fade:.3f}" + r"\,1))"
+        )
+        filters.append(
+            "drawtext="
+            f"textfile='{path}':reload=0:"
+            f"{font_option}:expansion=none:"
+            f"fontcolor={DEFAULT_STORY_CAPTION_STYLE.font_color}:"
+            f"fontsize=h/{divisor}:"
+            "line_spacing=10:"
+            "borderw=1:bordercolor=black@0.38:"
+            "shadowx=1:shadowy=2:shadowcolor=black@0.40:"
+            "x=(w-text_w)/2:"
+            f"y=h*{y:.3f}:"
+            f"alpha='{alpha}':"
+            f"enable='between(t,{start:.3f},{end:.3f})'"
         )
 
-        previous_position = position
-
-        cue_duration = max(
-            0.20,
-            cue_end - cue_start,
-        )
-
-        word_weights = [
-            max(
-                1.0,
-                min(
-                    2.5,
-                    len(
-                        re.sub(
-                            r"[^\\w']",
-                            "",
-                            word,
-                        )
-                    ) / 4.0,
-                ),
-            )
-            for word in words
-        ]
-
-        total_weight = sum(word_weights)
-        cursor = cue_start
-
-        for word_index, (
-            word,
-            weight,
-        ) in enumerate(
-            zip(words, word_weights),
-            start=1,
-        ):
-            rendered_word_count += 1
-
-            word_duration = (
-                cue_duration
-                * weight
-                / total_weight
-            )
-
-            word_end = (
-                cue_end
-                if word_index == len(words)
-                else cursor + word_duration
-            )
-
-            word_file = (
-                temp_dir
-                / (
-                    f"cue_{cue_index:04d}_"
-                    f"word_{word_index:03d}.txt"
-                )
-            )
-
-            word_file.write_text(
-                word,
-                encoding="utf-8",
-            )
-
-            path = _escape_filter_path(
-                word_file
-            )
-
-            filters.append(
-                "drawtext="
-                f"textfile='{path}':"
-                "reload=0:"
-                f"{font_option}:"
-                "expansion=none:"
-                "fontcolor=white:"
-                "fontsize=h/21:"
-                "borderw=3:"
-                "bordercolor=black@0.88:"
-                "shadowx=2:"
-                "shadowy=3:"
-                "shadowcolor=black@0.70:"
-                f"x={x_expr}:"
-                f"y={y_expr}:"
-                f"enable='between(t,"
-                f"{cursor:.3f},"
-                f"{word_end:.3f})'"
-            )
-
-            cursor = word_end
-
-    if not filters:
-        raise RuntimeError(
-            "Caption rendering produced no "
-            "readable words."
-        )
-
-    return (
-        ",".join(filters),
-        rendered_word_count,
-    )
-
+    return ",".join(filters), len(overlays)
 
 def _copy_sidecar(subtitles: Path, output: Path) -> Path:
-    sidecar = output.with_suffix(".srt")
+    sidecar = output.with_suffix(subtitles.suffix.lower())
     shutil.copy2(subtitles, sidecar)
     return sidecar
 
@@ -377,32 +289,41 @@ def _write_log(output: Path, command: list[str], stderr: str, summary: str) -> P
 
 
 def build_episode(video: Path, narration: Path, output: Path, system: SystemStatus, music: Path | None = None,
-                  subtitles: Path | None = None, music_volume: int = 18, burn_captions: bool = True) -> BuildResult:
+                  subtitles: Path | None = None, music_volume: int = 18, burn_captions: bool = True,
+                  brand_identity: BrandIdentity | None = None) -> BuildResult:
     if not system.can_build:
         raise RuntimeError("FFmpeg and FFprobe are required to build an episode.")
-    if subtitles and subtitles.suffix.lower() != ".srt":
-        raise RuntimeError("Captions must be a standard .srt file.")
+    if subtitles and subtitles.suffix.lower() not in SUPPORTED_OVERLAY_SUFFIXES:
+        raise RuntimeError(
+            "Text overlays must be story_highlights.json or a standard .srt transcript."
+        )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     narration_duration = probe_duration(narration)
     tail_duration = 1.5
-    final_duration = narration_duration + tail_duration
+    identity = brand_identity or BrandIdentity()
+    intro_duration = identity.intro_duration if identity.enabled else 0.0
+    final_duration = intro_duration + narration_duration + tail_duration
     command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "verbose", "-stream_loop", "-1", "-i", str(video), "-i", str(narration)]
+    narration_delay = int(round(intro_duration * 1000))
     if music:
         command += ["-stream_loop", "-1", "-i", str(music)]
-        duration = final_duration
         fade = min(3.0, max(1.0, narration_duration / 4))
         fade_out = max(0.0, final_duration - fade)
         volume = max(0.0, min(1.0, music_volume / 100.0))
         audio_filters = (
-            f"[1:a]volume=1.0[narration];"
+            f"[1:a]adelay={narration_delay}|{narration_delay},volume=1.0[narration];"
             f"[2:a]volume={volume:.3f},afade=t=in:st=0:d={fade:.2f},"
             f"afade=t=out:st={fade_out:.2f}:d={fade:.2f}[music];"
-            f"[narration][music]amix=inputs=2:duration=longest:dropout_transition=2,atrim=duration={final_duration:.3f}[audio]"
+            f"[narration][music]amix=inputs=2:duration=longest:dropout_transition=2,"
+            f"atrim=duration={final_duration:.3f}[audio]"
         )
-        command += ["-filter_complex", audio_filters, "-map", "0:v:0", "-map", "[audio]"]
     else:
-        command += ["-map", "0:v:0", "-map", "1:a:0"]
+        audio_filters = (
+            f"[1:a]adelay={narration_delay}|{narration_delay},"
+            f"atrim=duration={final_duration:.3f}[audio]"
+        )
+    command += ["-filter_complex", audio_filters, "-map", "0:v:0", "-map", "[audio]"]
 
     captions_burned = False
     renderer = "none"
@@ -420,14 +341,46 @@ def build_episode(video: Path, narration: Path, output: Path, system: SystemStat
         # even though drawtext works when invoked directly.
         if subtitles and burn_captions:
             temp_context = tempfile.TemporaryDirectory(prefix="mother_earth_captions_")
-            graph, cue_count = _drawtext_filter_graph(subtitles, Path(temp_context.name), video)
-            command += ["-vf", graph]
-            renderer = "portable drawtext"
+            graph, cue_count = _drawtext_filter_graph(
+                subtitles,
+                Path(temp_context.name),
+                video,
+                time_offset=intro_duration,
+            )
+            brand_graph = build_brand_filter(
+                Path(temp_context.name),
+                final_duration,
+                identity,
+            )
+            video_graph = ",".join(
+                part for part in (brand_graph, graph) if part
+            )
+            command += ["-vf", video_graph]
+            renderer = (
+                "Story Highlights overlay timeline"
+                if subtitles.suffix.lower() == ".json"
+                else "Transcript fallback overlay timeline"
+            )
             expected_marker = "drawtext"
             verification = f"requested {cue_count} cue(s)"
         elif subtitles:
-            warning = "MP4 created without burned captions because caption burning was turned off. The .srt was saved beside it."
+            warning = (
+                "MP4 created without burned text overlays because overlay burning was turned off. "
+                f"The {subtitles.suffix.lower()} source was saved beside it."
+            )
             verification = "burning disabled"
+
+        if identity.enabled and not (subtitles and burn_captions):
+            temp_context = tempfile.TemporaryDirectory(
+                prefix="mother_earth_brand_"
+            )
+            brand_graph = build_brand_filter(
+                Path(temp_context.name),
+                final_duration,
+                identity,
+            )
+            if brand_graph:
+                command += ["-vf", brand_graph]
 
         command += [
             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",

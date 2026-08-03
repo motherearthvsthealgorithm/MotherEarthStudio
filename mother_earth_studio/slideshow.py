@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -63,13 +64,47 @@ def write_concat_file(
     seconds_per_image: float,
 ) -> None:
     if seconds_per_image <= 0:
-        raise ValueError("seconds_per_image must be greater than zero.")
+        raise ValueError(
+            "seconds_per_image must be greater than zero."
+        )
     lines: list[str] = []
     for image in images:
         lines.append(f"file '{_escape_concat_path(image)}'")
         lines.append(f"duration {seconds_per_image:.6f}")
     lines.append(f"file '{_escape_concat_path(images[-1])}'")
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    destination.write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def build_looped_image_sequence(
+    images: Sequence[Path],
+    total_duration: float,
+    *,
+    target_seconds_per_image: float = 3.5,
+) -> tuple[list[Path], float]:
+    if not images:
+        raise ValueError("Choose at least one image.")
+    if total_duration <= 0:
+        raise ValueError(
+            "total_duration must be greater than zero."
+        )
+    if target_seconds_per_image <= 0:
+        raise ValueError(
+            "target_seconds_per_image must be greater than zero."
+        )
+
+    slide_count = max(
+        len(images),
+        math.ceil(total_duration / target_seconds_per_image),
+    )
+    seconds_per_image = total_duration / slide_count
+    repeated = [
+        images[index % len(images)]
+        for index in range(slide_count)
+    ]
+    return repeated, seconds_per_image
 
 
 def build_slideshow_command(
@@ -80,6 +115,8 @@ def build_slideshow_command(
     width: int = 1080,
     height: int = 1920,
     fps: int = 30,
+    fade_in_seconds: float = 1.0,
+    fade_out_seconds: float = 1.0,
 ) -> list[str]:
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be greater than zero.")
@@ -88,9 +125,20 @@ def build_slideshow_command(
     if total_duration <= 0:
         raise ValueError("total_duration must be greater than zero.")
 
+    if fade_in_seconds < 0 or fade_out_seconds < 0:
+        raise ValueError("Fade durations cannot be negative.")
+
+    fade_out_start = max(
+        fade_in_seconds,
+        total_duration - fade_out_seconds,
+    )
     visual_filter = (
         f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},setsar=1,fps={fps},format=yuv420p"
+        f"crop={width}:{height},setsar=1,fps={fps},"
+        f"fade=t=in:st=0:d={fade_in_seconds:.3f}:color=black,"
+        f"fade=t=out:st={fade_out_start:.3f}:"
+        f"d={fade_out_seconds:.3f}:color=black,"
+        "format=yuv420p"
     )
 
     return [
@@ -125,15 +173,23 @@ def build_photo_slideshow(
     validated = validate_images(images)
     output = Path(output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    seconds_per_image = calculate_seconds_per_image(
-        len(validated), total_duration
+    repeated_images, seconds_per_image = (
+        build_looped_image_sequence(
+            validated,
+            total_duration,
+            target_seconds_per_image=3.5,
+        )
     )
 
     with tempfile.TemporaryDirectory(
         prefix="mother_earth_slideshow_"
     ) as temp_dir:
         concat_file = Path(temp_dir) / "slides.ffconcat"
-        write_concat_file(validated, concat_file, seconds_per_image)
+        write_concat_file(
+            repeated_images,
+            concat_file,
+            seconds_per_image,
+        )
         command = build_slideshow_command(
             concat_file,
             output,
@@ -141,6 +197,8 @@ def build_photo_slideshow(
             width=width,
             height=height,
             fps=fps,
+            fade_in_seconds=1.0,
+            fade_out_seconds=1.0,
         )
         completed = runner(
             command,

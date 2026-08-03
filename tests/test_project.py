@@ -54,7 +54,7 @@ class ProjectTests(unittest.TestCase):
 
             self.assertEqual(
                 metadata["version"],
-                "0.10.0",
+                "0.11.3",
             )
 
             self.assertEqual(

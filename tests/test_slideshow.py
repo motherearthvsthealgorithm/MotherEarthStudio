@@ -82,7 +82,7 @@ class SlideshowTests(unittest.TestCase):
                 [first, second], output, 8.0, runner=fake_runner
             )
             self.assertEqual(result.image_count, 2)
-            self.assertEqual(result.seconds_per_image, 4.0)
+            self.assertAlmostEqual(result.seconds_per_image, 8.0 / 3.0, places=3)
             self.assertEqual(result.transition, "cut")
             self.assertEqual(len(calls), 1)
             self.assertTrue(output.exists())
